@@ -1,4 +1,3 @@
-# main.py
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -6,102 +5,97 @@ import functions as f
 import streamlit as st
 from scipy.interpolate import griddata
 import plotly.graph_objects as go
+import requests
 
+# 1. Yahoo Finance එක රවට්ටන්න Browser එකක් වගේ Headers හදමු
+def get_session():
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    })
+    return session
 
-def get_stock_data(ticker_symbol="SPY", period="1y"):
-    stock = yf.Ticker(ticker_symbol)
-    spot_prices = stock.history(period=period)["Close"].to_frame()
-
-    # Attempt to get today's spot price safely
-    spot_data = stock.history(period="1d")["Close"]
-
-    if not spot_data.empty:
-        spot_price = spot_data.iloc[-1]
-    else:
-        st.warning(f"No recent data available for ticker {ticker_symbol}. Defaulting to last available price from historical data.")
-        spot_price = spot_prices.iloc[-1, 0] if not spot_prices.empty else None
-
-    if spot_price is None:
-        raise ValueError(f"No data available for ticker {ticker_symbol}. Please check the ticker symbol or try again later.")
+# 2. Caching පාවිච්චි කරලා Requests ගණන අඩු කරමු (විනාඩි 15ක් යනකම් දත්ත මතක තියාගනී)
+@st.cache_data(ttl=900)
+def get_stock_data(ticker_symbol="GC=F", period="1y"):
+    session = get_session()
+    stock = yf.Ticker(ticker_symbol, session=session)
     
-    return stock, spot_prices, spot_price
+    try:
+        # ඉතිහාස දත්ත සහ වර්තමාන මිල ලබා ගැනීම
+        hist = stock.history(period=period)
+        if hist.empty:
+            raise ValueError("No historical data found.")
+            
+        spot_price = hist['Close'].iloc[-1]
+        return stock, hist, spot_price
+    except Exception as e:
+        st.error(f"Yahoo Finance Error: {e}")
+        # Error එකක් ආවොත් App එක Crash නොවී ඉන්න සාමාන්‍ය අගයක් දෙමු
+        return stock, pd.DataFrame(), 2700.0
 
-
-def get_options_data(stock):
+@st.cache_data(ttl=900)
+def get_options_data(_stock):
+    # දත්ත ගොඩක් ඉල්ලන්නේ නැතුව මුල් Expiry Dates 8ක් විතරක් ගමු
+    expiries = _stock.options[:8] 
     calls_frames = []
-    for date in stock.options:
+    
+    for date in expiries:
         try:
-            chain = stock.option_chain(date).calls.copy()
+            chain = _stock.option_chain(date).calls.copy()
             chain["expiration"] = date
             calls_frames.append(chain)
-        except Exception:
+        except:
             continue
 
     calls_all = pd.concat(calls_frames, ignore_index=True) if calls_frames else pd.DataFrame()
-    return calls_all, stock.options
+    return calls_all, expiries
 
 def filter_calls_data(calls_data, spot_price, min_strike_price, max_strike_price):
+    if calls_data.empty:
+        return pd.DataFrame()
+        
     filtered_calls_data = calls_data[
         (calls_data["strike"] >= min_strike_price) &
         (calls_data["strike"] <= max_strike_price)].copy()
 
     filtered_calls_data["TimeToExpiry"] = filtered_calls_data["expiration"].map(f.calculate_time_to_expiration)
-    filtered_calls_data = filtered_calls_data[filtered_calls_data["TimeToExpiry"] >= 0.07]
+    
+    # ඉතා කෙටි කාලීන Options අයින් කරමු (Noise වැඩි නිසා)
+    filtered_calls_data = filtered_calls_data[filtered_calls_data["TimeToExpiry"] >= 0.02]
 
-    bid = filtered_calls_data["bid"]
-    ask = filtered_calls_data["ask"]
-    mid = 0.5 * (bid + ask)
-
-    filtered_calls_data["midPrice"] = np.where(
-        (bid > 0) & (ask > 0),
-        mid,
-        filtered_calls_data["lastPrice"])
-
+    # Bid/Ask මැද මිල ගමු
+    filtered_calls_data["midPrice"] = 0.5 * (filtered_calls_data["bid"] + filtered_calls_data["ask"])
+    
+    # Bid/Ask නැත්නම් Last Price එක පාවිච්චි කරමු
+    filtered_calls_data["midPrice"] = filtered_calls_data["midPrice"].replace(0, np.nan).fillna(filtered_calls_data["lastPrice"])
 
     return filtered_calls_data.reset_index(drop=True)
 
-
 def calculate_implied_volatility(filtered_calls_data, spot_price, risk_free_rate, dividend_yield):
     rows = []
+    if filtered_calls_data.empty:
+        return pd.DataFrame()
+
     for _, row in filtered_calls_data.iterrows():
         T = row["TimeToExpiry"]
         price = row["midPrice"]
 
         if not np.isfinite(price) or price <= 0: continue
-        if not np.isfinite(T) or T <= 0: continue
+        
+        # Black-Scholes භාවිතයෙන් සැබෑ IV එක ගණනය කිරීම
         iv = f.Call_IV(spot_price, row["strike"], risk_free_rate, T, price, dividend_yield)
+        
         if np.isfinite(iv):
             rows.append((row["contractSymbol"], row["strike"], T, iv))
 
-    imp_vol_data = pd.DataFrame(rows, columns=["ContractSymbol","StrikePrice","TimeToExpiry","ImpliedVolatility"])
-
-
-    return imp_vol_data.dropna().reset_index(drop=True)
+    return pd.DataFrame(rows, columns=["ContractSymbol","StrikePrice","TimeToExpiry","ImpliedVolatility"])
 
 def get_plot_data(filtered_df):
+    if filtered_df.empty:
+        return np.array([]), np.array([]), np.array([])
     X = filtered_df['TimeToExpiry'].values
     Y = filtered_df['StrikePrice'].values
     Z = filtered_df['ImpliedVolatility'].values * 100
-
     return X, Y, Z
-
-# Optional: a function to create the plot if needed.
-def plot_implied_volatility(X, Y, Z):
-    xi = np.linspace(X.min(), X.max(), 50)
-    yi = np.linspace(Y.min(), Y.max(), 50)
-    xi, yi = np.meshgrid(xi, yi)
-
-    zi = griddata((X, Y), Z, (xi, yi), method="linear")
-    zi2 = griddata((X, Y), Z, (xi, yi), method="nearest")
-    zi = np.where(np.isnan(zi), zi2, zi)
-
-    fig = go.Figure(data=[go.Surface(x=xi, y=yi, z=zi, colorscale="Viridis")])
-    fig.update_layout(
-        title="Implied Volatility Surface",
-        scene=dict(
-            xaxis_title="Time to Expiration (years)",
-            yaxis_title="Strike Price ($)",
-            zaxis_title="Implied Volatility (%)",
-        ),
-    )
-    return fig
