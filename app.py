@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import time
 
 st.set_page_config(page_title="Gold Volatility Terminal", layout="wide")
 
@@ -16,38 +17,49 @@ st.markdown("""
 
 st.title("GC=F GOLD FUTURES: LIVE VOLATILITY SURFACE")
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def fetch_market_data():
-    try:
-        gold = yf.Ticker("GC=F")
-        expirations = gold.options[:5] # පළමු මාස 5 ක දත්ත
-        data_list = []
-        
-        for expiry in expirations:
-            chain = gold.option_chain(expiry).calls
-            for _, row in chain.iterrows():
-                data_list.append({
-                    'strike': row['strike'],
-                    'expiry': expiry,
-                    'iv': row['impliedVolatility']
-                })
-        return pd.DataFrame(data_list)
-    except Exception:
-        return pd.DataFrame()
+    gold = yf.Ticker("GC=F")
+    # දත්ත ලැබෙන තෙක් 3 වතාවක් උත්සාහ කරයි
+    for i in range(3):
+        try:
+            expirations = gold.options[:5]
+            if not expirations:
+                time.sleep(1)
+                continue
+                
+            data_list = []
+            for expiry in expirations:
+                chain = gold.option_chain(expiry).calls
+                for _, row in chain.iterrows():
+                    data_list.append({
+                        'strike': row['strike'],
+                        'expiry': expiry,
+                        'iv': row['impliedVolatility']
+                    })
+            if data_list:
+                return pd.DataFrame(data_list)
+        except Exception:
+            time.sleep(1)
+    return pd.DataFrame()
 
 df = fetch_market_data()
 
 if not df.empty:
     df['dte'] = (pd.to_datetime(df['expiry']) - datetime.now()).dt.days
     
-    # 3D Mesh Plot (Interpolation නැතිව කෙලින්ම අඳින නිසා වේගවත්)
-    fig = go.Figure(data=[go.Mesh3d(
+    # පෘෂ්ඨය ලස්සනට පෙන්වීමට scatter3d භාවිතය (වැඩි වේගයක් සඳහා)
+    fig = go.Figure(data=[go.Scatter3d(
         x=df['strike'],
         y=df['dte'],
         z=df['iv'],
-        intensity=df['iv'],
-        colorscale='YlOrRd',
-        opacity=0.8
+        mode='markers',
+        marker=dict(
+            size=4,
+            color=df['iv'],
+            colorscale='YlOrRd',
+            opacity=0.8
+        )
     )])
 
     fig.update_layout(
@@ -61,6 +73,7 @@ if not df.empty:
     )
     
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Last Update: " + datetime.now().strftime("%H:%M:%S"))
+    st.success("Market Data Synchronized Successfully!")
 else:
-    st.error("Market data currently unavailable. Please try refreshing in a few seconds.")
+    st.warning("Yahoo Finance is currently rate-limiting requests. Please wait 1-2 minutes and refresh your browser.")
+    st.info("Tip: If you keep seeing this, try checking if 'GC=F' is active on Yahoo Finance website.")
