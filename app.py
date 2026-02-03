@@ -4,12 +4,9 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from scipy.interpolate import griddata
 
-# Page Configuration
 st.set_page_config(page_title="Gold Volatility Terminal", layout="wide")
 
-# Dark Theme CSS
 st.markdown("""
     <style>
     .main { background-color: #0e1117; }
@@ -21,63 +18,49 @@ st.title("GC=F GOLD FUTURES: LIVE VOLATILITY SURFACE")
 
 @st.cache_data(ttl=60)
 def fetch_market_data():
-    gold = yf.Ticker("GC=F")
-    expirations = gold.options[:8]
-    data_list = []
-    
-    for expiry in expirations:
-        try:
+    try:
+        gold = yf.Ticker("GC=F")
+        expirations = gold.options[:5] # පළමු මාස 5 ක දත්ත
+        data_list = []
+        
+        for expiry in expirations:
             chain = gold.option_chain(expiry).calls
             for _, row in chain.iterrows():
-                if row['impliedVolatility'] > 0.01: 
-                    data_list.append({
-                        'strike': row['strike'],
-                        'expiry': expiry,
-                        'iv': row['impliedVolatility']
-                    })
-        except:
-            continue
-    return pd.DataFrame(data_list)
+                data_list.append({
+                    'strike': row['strike'],
+                    'expiry': expiry,
+                    'iv': row['impliedVolatility']
+                })
+        return pd.DataFrame(data_list)
+    except Exception:
+        return pd.DataFrame()
 
-try:
-    df = fetch_market_data()
+df = fetch_market_data()
+
+if not df.empty:
+    df['dte'] = (pd.to_datetime(df['expiry']) - datetime.now()).dt.days
     
-    if not df.empty:
-        df['dte'] = (pd.to_datetime(df['expiry']) - datetime.now()).dt.days
-        
-        # Grid Generation
-        strike_grid = np.linspace(df['strike'].min(), df['strike'].max(), 100)
-        dte_grid = np.linspace(df['dte'].min(), df['dte'].max(), 100)
-        strike_grid, dte_grid = np.meshgrid(strike_grid, dte_grid)
-        
-        iv_grid = griddata(
-            (df['strike'], df['dte']), 
-            df['iv'], 
-            (strike_grid, dte_grid), 
-            method='linear'
-        )
+    # 3D Mesh Plot (Interpolation නැතිව කෙලින්ම අඳින නිසා වේගවත්)
+    fig = go.Figure(data=[go.Mesh3d(
+        x=df['strike'],
+        y=df['dte'],
+        z=df['iv'],
+        intensity=df['iv'],
+        colorscale='YlOrRd',
+        opacity=0.8
+    )])
 
-        fig = go.Figure(data=[go.Surface(
-            x=strike_grid, 
-            y=dte_grid, 
-            z=iv_grid, 
-            colorscale='YlOrRd'
-        )])
-        
-        fig.update_layout(
-            scene=dict(
-                xaxis_title='Strike Price ($)',
-                yaxis_title='Days to Expiry (DTE)',
-                zaxis_title='Implied Volatility (IV)',
-            ),
-            width=1100, height=800,
-            template="plotly_dark"
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("System Status: Active | Last Sync: " + datetime.now().strftime("%H:%M:%S"))
-        
-    else:
-        st.info("Synchronizing with Market Data... Please wait.")
-except Exception as e:
-    st.error(f"Operational Error: {e}")
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='Strike Price ($)',
+            yaxis_title='Days to Expiry (DTE)',
+            zaxis_title='Implied Volatility (IV)',
+        ),
+        width=1100, height=800,
+        template="plotly_dark"
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Last Update: " + datetime.now().strftime("%H:%M:%S"))
+else:
+    st.error("Market data currently unavailable. Please try refreshing in a few seconds.")
